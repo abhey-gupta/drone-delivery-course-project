@@ -100,7 +100,7 @@ export default async function FleetPage() {
                       {/* Details */}
                       <div className="space-y-1.5 text-[11px] text-slate-500">
                         <div className="flex items-center justify-between">
-                          <span>Home Hub</span>
+                          <span>Current Hub</span>
                           <span className="text-slate-400">{drone.currentHubId ? `Hub #${drone.currentHubId}` : '—'}</span>
                         </div>
                         <div className="flex items-center justify-between">
@@ -157,7 +157,7 @@ export default async function FleetPage() {
 
               {/* Hub */}
               <div>
-                <label className="block text-xs font-medium uppercase tracking-wide text-slate-500 mb-1.5">Home Hub</label>
+                <label className="block text-xs font-medium uppercase tracking-wide text-slate-500 mb-1.5">Station Hub</label>
                 <select
                   name="hubId"
                   className="w-full rounded-lg border border-slate-700/50 bg-[#0c1220] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
@@ -168,22 +168,9 @@ export default async function FleetPage() {
                     </option>
                   ))}
                 </select>
-                <p className="text-[10px] text-slate-600 mt-1">The hub where this drone will be stationed.</p>
-              </div>
-
-              {/* Zone */}
-              <div>
-                <label className="block text-xs font-medium uppercase tracking-wide text-slate-500 mb-1.5">Operating Zone</label>
-                <select
-                  name="zoneId"
-                  className="w-full rounded-lg border border-slate-700/50 bg-[#0c1220] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
-                >
-                  {overview.zones.map((zone) => (
-                    <option key={zone.zoneId} value={zone.zoneId}>
-                      Zone {zone.zoneId} — {zone.label}
-                    </option>
-                  ))}
-                </select>
+                <p className="text-[10px] text-slate-600 mt-1">
+                  The drone&apos;s operating zone is derived automatically from this hub.
+                </p>
               </div>
 
               <button className="w-full rounded-xl bg-gradient-to-r from-blue-600 to-blue-500 px-4 py-3 text-sm font-semibold text-white hover:from-blue-500 hover:to-blue-400 transition-all shadow-lg shadow-blue-500/15 active:scale-[0.98] mt-2">

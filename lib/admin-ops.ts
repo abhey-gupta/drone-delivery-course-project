@@ -190,7 +190,8 @@ function isClosedOrderStatus(status: string | null | undefined) {
 }
 
 function droneLabel(droneId: number, model?: ModelRow | null) {
-  return model?.model_name?.trim() || `Drone #${droneId}`;
+  const modelName = model?.model_name?.trim();
+  return modelName ? `${modelName} · #${droneId}` : `Drone #${droneId}`;
 }
 
 function positionFromOrder(order: AdminBatchOrder): LatLngPoint | null {

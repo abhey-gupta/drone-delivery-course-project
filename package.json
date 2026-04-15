@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "demo:seed-orders": "node scripts/seed-demo-orders.mjs",
     "sim:once": "node scripts/simulator-worker.mjs --once",
     "sim:worker": "node scripts/simulator-worker.mjs"
   },

@@ -29,13 +29,80 @@ async function loadDrone(droneId: number) {
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
     .from('drones')
-    .select('drone_id, status')
+    .select('drone_id, status, current_hub_id, home_hub_id')
     .eq('drone_id', droneId)
     .maybeSingle();
 
   if (error) throw new Error(error.message);
   if (!data) throw new Error(`Drone #${droneId} does not exist.`);
-  return data as { drone_id: number; status: string | null };
+  return data as { drone_id: number; status: string | null; current_hub_id: number | null; home_hub_id: number | null };
+}
+
+async function loadHubStation(hubId: number) {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from('hubs')
+    .select('hub_id, hub_location_id, zone_id, hub_location')
+    .eq('hub_id', hubId)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error(`Hub #${hubId} does not exist.`);
+  const hub = data as {
+    hub_id: number;
+    hub_location_id: number | null;
+    zone_id: number | null;
+    hub_location: unknown;
+  };
+
+  if (!hub.hub_location_id) {
+    return {
+      hub_id: hub.hub_id,
+      zone_id: hub.zone_id,
+      hub_location: hub.hub_location ?? null,
+    };
+  }
+
+  const { data: hubLocationData, error: hubLocationError } = await supabase
+    .from('hub_location_zone')
+    .select('hub_location_id, zone_id, hub_location')
+    .eq('hub_location_id', hub.hub_location_id)
+    .maybeSingle();
+
+  if (hubLocationError) throw new Error(hubLocationError.message);
+
+  const hubLocation = hubLocationData as {
+    hub_location_id: number;
+    zone_id: number | null;
+    hub_location: unknown;
+  } | null;
+
+  return {
+    hub_id: hub.hub_id,
+    zone_id: hubLocation?.zone_id ?? hub.zone_id,
+    hub_location: hubLocation?.hub_location ?? hub.hub_location ?? null,
+  };
+}
+
+async function getDockedDroneUpdate(droneId: number, timestamp: string) {
+  const drone = await loadDrone(droneId);
+  const hubId = drone.current_hub_id ?? drone.home_hub_id;
+  if (!hubId) {
+    return {
+      status: 'available',
+      updated_at: timestamp,
+      last_seen_at: timestamp,
+    };
+  }
+
+  const hub = await loadHubStation(hubId);
+  return {
+    status: 'available',
+    current_hub_id: hub.hub_id,
+    updated_at: timestamp,
+    last_seen_at: timestamp,
+    last_known_location: hub.hub_location ?? null,
+  };
 }
 
 async function updateOrdersForBatch(batchId: number, status: string) {
@@ -145,12 +212,10 @@ export async function releaseDroneFromBatch(formData: FormData) {
   const timestamp = nowIso();
 
   if (batch.drone_id) {
+    const dockedDroneUpdate = await getDockedDroneUpdate(batch.drone_id, timestamp);
     const { error: droneError } = await supabase
       .from('drones')
-      .update({
-        status: 'available',
-        updated_at: timestamp,
-      })
+      .update(dockedDroneUpdate)
       .eq('drone_id', batch.drone_id);
 
     if (droneError) throw new Error(droneError.message);
@@ -244,12 +309,15 @@ export async function updateBatchStatus(formData: FormData) {
   await updateBatchStopsForBatch(batchId, stopStatus);
 
   if (batch.drone_id && droneStatus) {
+    const droneUpdate = droneStatus === 'available'
+      ? await getDockedDroneUpdate(batch.drone_id, timestamp)
+      : {
+          status: droneStatus,
+          updated_at: timestamp,
+        };
     const { error: droneError } = await supabase
       .from('drones')
-      .update({
-        status: droneStatus,
-        updated_at: timestamp,
-      })
+      .update(droneUpdate)
       .eq('drone_id', batch.drone_id);
 
     if (droneError) throw new Error(droneError.message);
@@ -292,12 +360,13 @@ export async function updateZoneGeometry(formData: FormData) {
   if (hubLocationLookupError) throw new Error(hubLocationLookupError.message);
 
   let hubLocationId = existingHubLocation?.hub_location_id ?? null;
+  const hubPoint = `SRID=4326;POINT(${hubLng} ${hubLat})`;
   if (hubLocationId) {
     const { error: hubLocationError } = await supabase
       .from('hub_location_zone')
       .update({
         zone_id: zoneId,
-        hub_location: `SRID=4326;POINT(${hubLng} ${hubLat})`,
+        hub_location: hubPoint,
       })
       .eq('hub_location_id', hubLocationId);
     if (hubLocationError) throw new Error(hubLocationError.message);
@@ -308,13 +377,22 @@ export async function updateZoneGeometry(formData: FormData) {
       .insert({
         hub_location_id: nextHubLocationId,
         zone_id: zoneId,
-        hub_location: `SRID=4326;POINT(${hubLng} ${hubLat})`,
+        hub_location: hubPoint,
       })
       .select('hub_location_id')
       .single();
     if (createHubLocationError) throw new Error(createHubLocationError.message);
     hubLocationId = createdHubLocation.hub_location_id;
   }
+
+  const { error: hubSyncError } = await supabase
+    .from('hubs')
+    .update({
+      zone_id: zoneId,
+      hub_location: hubPoint,
+    })
+    .eq('hub_location_id', hubLocationId);
+  if (hubSyncError) throw new Error(hubSyncError.message);
 
   const { data: existingHub, error: hubLookupError } = await supabase
     .from('hubs')
@@ -332,6 +410,31 @@ export async function updateZoneGeometry(formData: FormData) {
     if (hubInsertError) throw new Error(hubInsertError.message);
   }
 
+  const { data: affectedHubs, error: affectedHubsError } = await supabase
+    .from('hubs')
+    .select('hub_id')
+    .eq('hub_location_id', hubLocationId);
+  if (affectedHubsError) throw new Error(affectedHubsError.message);
+
+  const affectedHubIds = (affectedHubs ?? [])
+    .map((hub) => hub.hub_id)
+    .filter((hubId): hubId is number => Number.isFinite(hubId));
+
+  if (affectedHubIds.length > 0) {
+    const timestamp = nowIso();
+    const { error: droneSyncError } = await supabase
+      .from('drones')
+      .update({
+        zone_id: zoneId,
+        last_known_location: hubPoint,
+        updated_at: timestamp,
+        last_seen_at: timestamp,
+      })
+      .in('current_hub_id', affectedHubIds)
+      .eq('status', 'available');
+    if (droneSyncError) throw new Error(droneSyncError.message);
+  }
+
   revalidatePath('/admin');
   revalidatePath('/admin/infrastructure');
   revalidatePath('/auth/register');
@@ -342,7 +445,6 @@ export async function updateZoneGeometry(formData: FormData) {
 export async function createDrone(formData: FormData) {
   const modelId = Number(formData.get('modelId'));
   const hubId = Number(formData.get('hubId'));
-  const zoneId = Number(formData.get('zoneId'));
 
   if (!Number.isFinite(modelId) || !Number.isFinite(hubId)) {
     throw new Error('Model and hub are required to create a drone.');
@@ -359,26 +461,20 @@ export async function createDrone(formData: FormData) {
   if (modelError) throw new Error(modelError.message);
   if (!modelData) throw new Error(`Model #${modelId} does not exist.`);
 
-  // Lookup hub location to set last_known_location
-  const { data: hubData, error: hubError } = await supabase
-    .from('hubs')
-    .select('hub_id, zone_id, hub_location')
-    .eq('hub_id', hubId)
-    .maybeSingle();
-
-  if (hubError) throw new Error(hubError.message);
-  if (!hubData) throw new Error(`Hub #${hubId} does not exist.`);
+  // Lookup the authoritative hub location to set last_known_location.
+  const hubData = await loadHubStation(hubId);
+  if (!hubData.zone_id) throw new Error(`Hub #${hubId} is not linked to a zone.`);
 
   const droneId = await nextIntegerId('drones', 'drone_id');
   const timestamp = nowIso();
-  const effectiveZoneId = Number.isFinite(zoneId) ? zoneId : (hubData.zone_id ?? null);
 
   const { error: insertError } = await supabase.from('drones').insert({
     drone_id: droneId,
     model_id: modelId,
     current_hub_id: hubId,
     home_hub_id: hubId,
-    zone_id: effectiveZoneId,
+    // A drone inherits its operating zone from the hub it is stationed at.
+    zone_id: hubData.zone_id,
     status: 'available',
     updated_at: timestamp,
     last_known_location: hubData.hub_location ?? null,
