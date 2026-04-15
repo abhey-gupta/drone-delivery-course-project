@@ -304,29 +304,46 @@ async function createDeliveryRecord(
 
   const bounds = computeWindowBounds(new Date(), 10);
 
-  const { data: existingBatch, error: batchLookupError } = await supabase
+  const { data: existingBatches, error: batchLookupError } = await supabase
     .from('delivery_batches')
-    .select('batch_id, status, collection_window_start, collection_window_end')
+    .select('batch_id')
     .eq('zone_id', input.zoneId)
-    .eq('collection_window_start', bounds.start)
-    .eq('collection_window_end', bounds.end)
+    .gte('collection_window_start', bounds.start)
+    .lt('collection_window_start', new Date(new Date(bounds.start).getTime() + 1000).toISOString())
     .eq('status', 'collecting')
-    .maybeSingle();
+    .order('created_at', { ascending: true });
 
   if (batchLookupError) throw new Error(batchLookupError.message);
 
-  let batchId = (existingBatch as { batch_id: number } | null)?.batch_id ?? null;
+  let batchId: number | null = null;
+  if (existingBatches && existingBatches.length > 0) {
+    for (const batch of existingBatches as { batch_id: number }[]) {
+      const { count, error: countError } = await supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('batch_id', batch.batch_id);
+      if (countError) throw new Error(countError.message);
+      if ((count ?? 0) < 10) {
+        batchId = batch.batch_id;
+        break;
+      }
+    }
+  }
 
   if (!batchId) {
     batchId = await nextIntegerId('delivery_batches', 'batch_id', supabase);
+
+    const offsetMs = existingBatches?.length ?? 0;
+    const windowStart = new Date(new Date(bounds.start).getTime() + offsetMs).toISOString();
+    const windowEnd = new Date(new Date(bounds.end).getTime() + offsetMs).toISOString();
 
     const { error: createBatchError } = await supabase.from('delivery_batches').insert({
       batch_id: batchId,
       zone_id: input.zoneId,
       drone_id: null,
       status: 'collecting',
-      collection_window_start: bounds.start,
-      collection_window_end: bounds.end,
+      collection_window_start: windowStart,
+      collection_window_end: windowEnd,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
@@ -480,7 +497,7 @@ export async function fetchSellerBatchMap(
 
   const batch = batchData as { batch_id: number; zone_id: number | null; drone_id: number | null; status: string | null };
 
-  const [orderResult, hubLocationsResult, sellerResult, storeLocationsResult, droneResult, zoneResult] = await Promise.all([
+  const [orderResult, hubLocationsResult, sellerResult, storeLocationsResult, droneResult, zoneResult, stopsResult] = await Promise.all([
     supabase.from('orders').select('order_id, seller_id, drop_location, status').eq('order_id', input.orderId).eq('seller_id', input.sellerId).eq('batch_id', input.batchId).maybeSingle(),
     batch.zone_id
       ? supabase.from('hub_location_zone').select('hub_location_id, hub_location, zone_id').eq('zone_id', batch.zone_id)
@@ -493,6 +510,7 @@ export async function fetchSellerBatchMap(
     batch.zone_id
       ? supabase.from('zones').select('zone_id, boundary_coordinates_ref').eq('zone_id', batch.zone_id).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
+    supabase.from('batch_stops').select('sequence_no, location, status').eq('batch_id', input.batchId).order('sequence_no', { ascending: true }),
   ]);
 
   if (orderResult.error) throw new Error(orderResult.error.message);
@@ -501,6 +519,7 @@ export async function fetchSellerBatchMap(
   if (storeLocationsResult.error) throw new Error(storeLocationsResult.error.message);
   if (droneResult.error) throw new Error(droneResult.error.message);
   if (zoneResult.error) throw new Error(zoneResult.error.message);
+  if (stopsResult.error) throw new Error(stopsResult.error.message);
 
   const order = orderResult.data as { order_id: number; seller_id: number; drop_location: unknown; status: string | null } | null;
   if (!order) return null;
@@ -514,6 +533,12 @@ export async function fetchSellerBatchMap(
   const sellerPoint = seller ? parsePoint(storeLocations.get(seller.store_location_id)?.store_location) : null;
   const parsedZone = parseHexZoneBoundary((zoneResult.data as { boundary_coordinates_ref?: string } | null)?.boundary_coordinates_ref ?? null);
   const zoneShape = parsedZone ?? deriveZoneShape([...(destinationPoint ? [destinationPoint] : []), ...(sellerPoint ? [sellerPoint] : []), ...(hubPoint ? [hubPoint] : [])]);
+
+  const stopsRow = (stopsResult.data ?? []) as Array<{ sequence_no: number; location: unknown; status: string | null }>;
+  const pendingStopPoints = stopsRow
+    .filter(s => !['completed', 'delivered', 'failed'].includes((s.status ?? '').toLowerCase()))
+    .map(s => parsePoint(s.location))
+    .filter((p): p is LatLngPoint => Boolean(p));
 
   const droneRow = droneResult.data as { drone_id: number; current_hub_id: number | null; status: string | null; last_known_location: unknown; last_seen_at: string | null } | null;
   const dronePosition = parsePoint(droneRow?.last_known_location ?? null) ?? hubPoint;
@@ -549,7 +574,14 @@ export async function fetchSellerBatchMap(
         label: shopDistance !== null ? `${shopDistance} m` : undefined,
         detail: 'Direct seller-to-drop distance',
       }] : []),
-      ...(droneRow && dronePosition && destinationPoint ? [{
+      ...(droneRow && dronePosition && pendingStopPoints.length > 0 ? [{
+        id: `drone-${droneRow?.drone_id ?? 'x'}-route`,
+        points: [dronePosition, ...pendingStopPoints],
+        color: '#8b5cf6',
+        weight: 3,
+        dashed: true,
+        detail: 'Live drone route',
+      }] : droneRow && dronePosition && destinationPoint ? [{
         id: `drone-${droneRow?.drone_id ?? 'x'}-to-order-${input.orderId}`,
         points: [dronePosition, destinationPoint],
         color: '#8b5cf6',
@@ -557,7 +589,14 @@ export async function fetchSellerBatchMap(
         dashed: true,
         detail: 'Live drone-to-drop direction',
       }] : []),
-      ...(!droneRow && hubPoint && destinationPoint ? [{
+      ...(!droneRow && hubPoint && pendingStopPoints.length > 0 ? [{
+        id: `hub-to-route-${input.batchId}`,
+        points: [hubPoint, ...pendingStopPoints],
+        color: '#94a3b8',
+        weight: 3,
+        dashed: true,
+        detail: 'Sequenced batch route',
+      }] : !droneRow && hubPoint && destinationPoint ? [{
         id: `hub-to-order-${input.orderId}`,
         points: [hubPoint, destinationPoint],
         color: '#94a3b8',

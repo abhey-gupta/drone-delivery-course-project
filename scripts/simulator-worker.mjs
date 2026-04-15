@@ -396,10 +396,174 @@ async function markBatchReady(batch) {
   console.log(`[ready] Batch #${batch.batch_id} is now ready.`);
 }
 
-async function assignDrone(batch, drones, hubZones, hubsByZone) {
+async function optimizeBatchRoute(batch, stopsByBatch, ordersById, hubsByZone) {
+  const stops = (stopsByBatch.get(batch.batch_id) ?? []).filter(s => (s.status ?? '').toLowerCase() === 'pending');
+  if (stops.length <= 1) return;
+
+  const zoneHubs = hubsByZone.get(batch.zone_id) ?? [];
+  const startHub = getBatchHub(batch, hubsByZone) ?? zoneHubs[0];
+  const startPoint = getHubPoint(startHub);
+  if (!startPoint) return;
+
+  const stopPoints = stops.map(stop => {
+    return {
+      stop,
+      point: getStopTargetPoint(stop, ordersById)
+    };
+  }).filter(s => Boolean(s.point));
+
+  if (stopPoints.length <= 1) return;
+
+  const n = stopPoints.length;
+  
+  const dist = Array(n).fill(0).map(() => new Float64Array(n));
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      dist[i][j] = distanceBetweenMeters(stopPoints[i].point, stopPoints[j].point);
+    }
+  }
+
+  const startDist = new Float64Array(n);
+  for (let i = 0; i < n; i++) startDist[i] = distanceBetweenMeters(startPoint, stopPoints[i].point);
+
+  const returnDist = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const nearestReturn = findNearestHub(stopPoints[i].point, zoneHubs) ?? zoneHubs[0];
+    const returnPoint = nearestReturn ? getHubPoint(nearestReturn) : null;
+    returnDist[i] = returnPoint ? distanceBetweenMeters(stopPoints[i].point, returnPoint) : 0;
+  }
+
+  const memo = Array.from({ length: 1 << n }, () => new Float64Array(n).fill(-1));
+  const nextNode = Array.from({ length: 1 << n }, () => new Int32Array(n).fill(-1));
+
+  function solve(mask, u) {
+    if (mask === (1 << n) - 1) return returnDist[u];
+    if (memo[mask][u] !== -1) return memo[mask][u];
+
+    let ans = Number.POSITIVE_INFINITY;
+    let bestNext = -1;
+
+    for (let v = 0; v < n; v++) {
+      if ((mask & (1 << v)) === 0) {
+        const cost = dist[u][v] + solve(mask | (1 << v), v);
+        if (cost < ans) {
+          ans = cost;
+          bestNext = v;
+        }
+      }
+    }
+    nextNode[mask][u] = bestNext;
+    return memo[mask][u] = ans;
+  }
+
+  let bestCost = Number.POSITIVE_INFINITY;
+  let firstNode = -1;
+
+  for (let i = 0; i < n; i++) {
+    const cost = startDist[i] + solve(1 << i, i);
+    if (cost < bestCost) {
+      bestCost = cost;
+      firstNode = i;
+    }
+  }
+
+  const bestOrder = [];
+  let currMask = 1 << firstNode;
+  let currNode = firstNode;
+
+  while(currNode !== -1) {
+    bestOrder.push(stopPoints[currNode]);
+    const nxt = nextNode[currMask][currNode];
+    if (nxt === -1) break;
+    currMask |= (1 << nxt);
+    currNode = nxt;
+  }
+
+  if (bestOrder.length > 0) {
+    for (let i = 0; i < bestOrder.length; i++) {
+      const stop = bestOrder[i].stop;
+      const newSequenceNo = i + 1;
+      if (stop.sequence_no !== newSequenceNo) {
+        await supabase.from('batch_stops').update({ sequence_no: newSequenceNo + 1000 }).eq('stop_id', stop.stop_id);
+      }
+    }
+    for (let i = 0; i < bestOrder.length; i++) {
+      const stop = bestOrder[i].stop;
+      const newSequenceNo = i + 1;
+      if (stop.sequence_no !== newSequenceNo) {
+        stop.sequence_no = newSequenceNo;
+        const { error } = await supabase.from('batch_stops').update({ sequence_no: newSequenceNo }).eq('stop_id', stop.stop_id);
+        if (error) console.error(`[optimize] Error: ${error.message}`);
+      }
+    }
+    console.log(`[optimize] Batch #${batch.batch_id} TSP route optimized (${stops.length} stops).`);
+  }
+}
+
+async function assignDrone(batch, drones, hubZones, hubsByZone, modelsById, ordersByBatch, stopsByBatch, allBatches, ordersById) {
   const timestamp = nowIso();
   const preferred = drones.find((drone) => hubZones.get(drone.current_hub_id) === batch.zone_id) ?? drones[0] ?? null;
   if (!preferred) return null;
+
+  const maxCapacity = modelsById.get(preferred.model_id)?.max_capacity ?? Number.POSITIVE_INFINITY;
+  const batchOrders = (ordersByBatch.get(batch.batch_id) ?? []).slice().sort((a, b) => a.order_id - b.order_id);
+  
+  let currentWeight = 0;
+  const keptOrders = [];
+  const overflowOrders = [];
+  
+  for (const order of batchOrders) {
+    if (currentWeight + (order.package_weight ?? 0) <= maxCapacity || keptOrders.length === 0) {
+      currentWeight += (order.package_weight ?? 0);
+      keptOrders.push(order);
+    } else {
+      overflowOrders.push(order);
+    }
+  }
+
+  if (overflowOrders.length > 0) {
+    const { data: latestBatch } = await supabase.from('delivery_batches').select('batch_id').order('batch_id', { ascending: false }).limit(1);
+    const newBatchId = (latestBatch?.[0]?.batch_id ?? 0) + 1;
+    
+    // Slight offset to bypass indexing limits for cloned collect batches if they still retained them
+    const newStart = new Date(new Date(batch.collection_window_start).getTime() + 1).toISOString();
+    const newEnd = new Date(new Date(batch.collection_window_end).getTime() + 1).toISOString();
+
+    const { error: cloneError } = await supabase.from('delivery_batches').insert({
+      batch_id: newBatchId,
+      zone_id: batch.zone_id,
+      status: 'ready',
+      drone_id: null,
+      collection_window_start: newStart,
+      collection_window_end: newEnd,
+      created_at: timestamp,
+      updated_at: timestamp,
+    });
+    if (cloneError) console.error(`[capacity] Error creating overflow batch:`, cloneError.message);
+    
+    const overflowIds = overflowOrders.map(o => o.order_id);
+    await supabase.from('orders').update({ batch_id: newBatchId }).in('order_id', overflowIds);
+    await supabase.from('batch_stops').update({ batch_id: newBatchId }).in('order_id', overflowIds);
+    
+    ordersByBatch.set(batch.batch_id, keptOrders);
+    ordersByBatch.set(newBatchId, overflowOrders);
+    
+    const batchStops = stopsByBatch.get(batch.batch_id) ?? [];
+    const keptStops = batchStops.filter(s => s.order_id === null || !overflowIds.includes(s.order_id));
+    const overflowStops = batchStops.filter(s => s.order_id && overflowIds.includes(s.order_id));
+    stopsByBatch.set(batch.batch_id, keptStops);
+    stopsByBatch.set(newBatchId, overflowStops);
+    
+    allBatches.push({
+      ...batch,
+      batch_id: newBatchId,
+      status: 'ready',
+      drone_id: null,
+      hub_id: null
+    });
+    
+    console.log(`[capacity] Split Batch #${batch.batch_id}. ${keptOrders.length} kept (${currentWeight}kg), ${overflowOrders.length} overflowed to Batch #${newBatchId}`);
+  }
 
   const currentHub = (hubsByZone.get(batch.zone_id) ?? []).find((hub) => hub.hub_id === preferred.current_hub_id) ?? getBatchHub(batch, hubsByZone);
   const currentPoint = parsePoint(preferred.last_known_location) ?? getHubPoint(currentHub);
@@ -424,10 +588,15 @@ async function assignDrone(batch, drones, hubZones, hubsByZone) {
 
   batch.drone_id = preferred.drone_id;
   batch.hub_id = currentHub?.hub_id ?? batch.hub_id ?? null;
+  batch.hub_id = currentHub?.hub_id ?? batch.hub_id ?? null;
   batch.status = 'assigned';
   preferred.status = 'assigned';
   preferred.last_known_location = currentPoint ? toPointValue(currentPoint) : preferred.last_known_location;
   console.log(`[assign] Drone #${preferred.drone_id} -> Batch #${batch.batch_id}`);
+
+  // TSP routing mathematically executed after load is finalized
+  await optimizeBatchRoute(batch, stopsByBatch, ordersById, hubsByZone);
+
   return preferred.drone_id;
 }
 
@@ -655,14 +824,15 @@ async function tick() {
   const timestamp = new Date();
   console.log(`\n[tick] ${timestamp.toISOString()}`);
 
-  const [batches, orders, stops, drones, hubs, hubLocations, sellers] = await Promise.all([
-    fetchTable('delivery_batches', 'batch_id, zone_id, hub_id, drone_id, status, collection_window_end, dispatched_at, completed_at, updated_at', (query) => query.in('status', ['collecting', 'ready', 'assigned', 'in_progress'])),
-    fetchTable('orders', 'order_id, seller_id, batch_id, zone_id, drop_location, status, updated_at, assigned_at, delivered_at', (query) => query.not('batch_id', 'is', null)),
+  const [batches, orders, stops, drones, hubs, hubLocations, sellers, models] = await Promise.all([
+    fetchTable('delivery_batches', 'batch_id, zone_id, hub_id, drone_id, status, collection_window_start, collection_window_end, dispatched_at, completed_at, updated_at', (query) => query.in('status', ['collecting', 'ready', 'assigned', 'in_progress'])),
+    fetchTable('orders', 'order_id, seller_id, batch_id, zone_id, drop_location, package_weight, status, updated_at, assigned_at, delivered_at', (query) => query.not('batch_id', 'is', null)),
     fetchTable('batch_stops', 'stop_id, batch_id, order_id, sequence_no, status, location, eta_at, arrived_at, completed_at'),
-    fetchTable('drones', 'drone_id, current_hub_id, home_hub_id, zone_id, status, last_known_location, last_seen_at'),
+    fetchTable('drones', 'drone_id, model_id, current_hub_id, home_hub_id, zone_id, status, last_known_location, last_seen_at'),
     fetchTable('hubs', 'hub_id, hub_location_id, zone_id, hub_location'),
     fetchTable('hub_location_zone', 'hub_location_id, hub_location, zone_id'),
     fetchTable('sellers', 'seller_id, name, email'),
+    fetchTable('models', 'model_id, max_capacity'),
   ]);
 
   const hubLocationsById = new Map(hubLocations.map((row) => [row.hub_location_id, row]));
@@ -677,6 +847,7 @@ async function tick() {
   }
 
   const hubZones = new Map(hydratedHubs.map((hub) => [hub.hub_id, hub.zone_id]));
+  const modelsById = new Map(models.map((m) => [m.model_id, m]));
   const ordersById = new Map(orders.map((order) => [order.order_id, order]));
   const ordersByBatch = new Map();
   for (const order of orders) {
@@ -724,7 +895,7 @@ async function tick() {
 
   const availableDrones = drones.filter((drone) => drone.status === 'available' && !reservedDroneIds.has(drone.drone_id));
   for (const batch of batches.filter((item) => item.status === 'ready' && !item.drone_id)) {
-    const assignedDroneId = await assignDrone(batch, availableDrones, hubZones, hubsByZone);
+    const assignedDroneId = await assignDrone(batch, availableDrones, hubZones, hubsByZone, modelsById, ordersByBatch, stopsByBatch, batches, ordersById);
     if (!assignedDroneId) {
       console.log(`[wait] Batch #${batch.batch_id} is ready but no drone is available.`);
       // ── Email admin: no drone available ──

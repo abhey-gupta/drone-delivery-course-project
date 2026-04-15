@@ -405,20 +405,25 @@ export async function fetchAdminOverview(): Promise<AdminOverview> {
     ];
     const nextRoutePoint = activeRoute[0] ?? zoneHub?.position ?? null;
     const droneHeading = drone?.position && nextRoutePoint ? bearingBetweenDegrees(drone.position, nextRoutePoint) : undefined;
-    const liveSellerMarkers = activeOrders
-      .map((order) => {
-        const seller = sellerSummaryMap.get(order.sellerId);
-        if (!seller?.position) return null;
-        return {
-          id: `batch-${batch.batch_id}-seller-${seller.sellerId}`,
-          label: seller.name,
-          kind: 'seller' as const,
-          position: seller.position,
-          color: '#f59e0b',
-          detail: seller.email,
-        };
-      })
-      .filter((marker): marker is NonNullable<typeof marker> => Boolean(marker));
+    const liveSellerMarkers = Array.from(
+      new Map(
+        activeOrders
+          .map((order) => {
+            const seller = sellerSummaryMap.get(order.sellerId);
+            if (!seller?.position) return null;
+            return {
+              id: `batch-${batch.batch_id}-seller-${seller.sellerId}`,
+              label: seller.name,
+              kind: 'seller' as const,
+              position: seller.position,
+              color: '#f59e0b',
+              detail: seller.email,
+            };
+          })
+          .filter((marker): marker is NonNullable<typeof marker> => Boolean(marker))
+          .map(marker => [marker.id, marker])
+      ).values()
+    );
     const liveOrderMarkers = activeOrders
       .map((order) => {
         const point = positionFromOrder(order);
