@@ -281,7 +281,7 @@ export default async function BatchesPage(props: { searchParams?: Promise<Record
                       <div className="min-w-0">
                         <div className="text-sm font-medium text-slate-200">{drone.label}</div>
                         <div className="text-xs text-slate-500 mt-0.5">
-                          Hub {drone.currentHubId ?? '—'} · {drone.currentCharge ?? 0}%
+                          Hub {drone.currentHubId ?? '—'}
                         </div>
                       </div>
                       <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase shrink-0 ${statusTone(drone.status)}`}>

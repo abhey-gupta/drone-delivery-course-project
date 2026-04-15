@@ -45,7 +45,7 @@ alter table if exists public.drones
 
 alter table if exists public.drones
   add constraint drones_status_check check (
-    status is null or status in ('available', 'charging', 'assigned', 'en_route', 'returning', 'offline')
+    status is null or status in ('available', 'assigned', 'en_route', 'returning', 'offline')
   );
 
 -- Delivery batches -----------------------------------------------------------

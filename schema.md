@@ -16,12 +16,10 @@ This is the current Phase 1 reference for the cloud Supabase schema.
 - `model_id`
 - `model_name`
 - `max_capacity`
-- `max_charge_duration`
 
 ### `drones`
 - `drone_id`
 - `model_id`
-- `current_charge`
 - `current_hub_id`
 - `status`
 - `updated_at`

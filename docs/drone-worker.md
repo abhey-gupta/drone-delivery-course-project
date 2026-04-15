@@ -194,7 +194,6 @@ This worker is deliberately simple. That is not a bug; it is scope control.
 ### What it does not do yet
 - no advanced route optimization / TSP
 - no battery simulation
-- no charging logic
 - no failure/retry handling beyond basic script errors
 - no websocket push layer
 

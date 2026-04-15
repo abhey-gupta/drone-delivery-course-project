@@ -42,7 +42,7 @@ interface DroneRow {
   drone_id: number;
   model_id: number;
   current_hub_id: number | null;
-  current_charge: number | null;
+  zone_id: number | null;
   status: string | null;
   updated_at: string | null;
   last_known_location: unknown;
@@ -53,7 +53,12 @@ interface ModelRow {
   model_id: number;
   model_name: string | null;
   max_capacity: number | null;
-  max_charge_duration: number | null;
+}
+
+export interface AdminModelSummary {
+  modelId: number;
+  label: string;
+  maxCapacity: number | null;
 }
 
 interface BatchStopRow {
@@ -150,9 +155,8 @@ export interface AdminDroneSummary {
   label: string;
   status: string;
   currentHubId: number | null;
-  currentCharge: number | null;
+  zoneId: number | null;
   maxCapacity: number | null;
-  maxChargeDuration: number | null;
   assignedBatchId: number | null;
   assignedZoneId: number | null;
   position: LatLngPoint | null;
@@ -161,6 +165,7 @@ export interface AdminDroneSummary {
 export interface AdminOverview {
   batches: AdminBatchSummary[];
   drones: AdminDroneSummary[];
+  models: AdminModelSummary[];
   hubs: Array<{ hubId: number; zoneId: number; position: LatLngPoint; label: string }>;
   sellers: Array<{ sellerId: number; zoneId: number | null; name: string; email: string; position: LatLngPoint | null }>;
   zones: AdminMapZone[];
@@ -212,8 +217,8 @@ export async function fetchAdminOverview(): Promise<AdminOverview> {
     supabase.from('orders').select('order_id, seller_id, batch_id, package_weight, drop_location, status, created_at, updated_at').order('created_at', { ascending: false }),
     supabase.from('sellers').select('seller_id, name, email, store_location_id'),
     supabase.from('store_location_zone').select('store_location_id, zone_id, store_location'),
-    supabase.from('drones').select('drone_id, model_id, current_hub_id, current_charge, status, updated_at, last_known_location, last_seen_at').order('drone_id', { ascending: true }),
-    supabase.from('models').select('model_id, model_name, max_capacity, max_charge_duration'),
+    supabase.from('drones').select('drone_id, model_id, current_hub_id, zone_id, status, updated_at, last_known_location, last_seen_at').order('drone_id', { ascending: true }),
+    supabase.from('models').select('model_id, model_name, max_capacity'),
     supabase.from('batch_stops').select('stop_id, batch_id, order_id, sequence_no, status').order('sequence_no', { ascending: true }),
     supabase.from('hubs').select('hub_id, hub_location_id'),
     supabase.from('hub_location_zone').select('hub_location_id, hub_location, zone_id'),
@@ -380,14 +385,19 @@ export async function fetchAdminOverview(): Promise<AdminOverview> {
       label: droneLabel(drone.drone_id, model),
       status: effectiveStatus,
       currentHubId: drone.current_hub_id,
-      currentCharge: drone.current_charge,
+      zoneId: drone.zone_id ?? assignedBatch?.zone_id ?? currentHub?.zoneId ?? null,
       maxCapacity: model?.max_capacity ?? null,
-      maxChargeDuration: model?.max_charge_duration ?? null,
       assignedBatchId: assignedBatch?.batch_id ?? null,
       assignedZoneId: assignedBatch?.zone_id ?? null,
       position,
     };
   });
+
+  const modelSummaries: AdminModelSummary[] = models.map((model) => ({
+    modelId: model.model_id,
+    label: model.model_name?.trim() || `Model #${model.model_id}`,
+    maxCapacity: model.max_capacity ?? null,
+  }));
 
   const droneMap = new Map(droneSummaries.map((drone) => [drone.droneId, drone]));
 
@@ -569,6 +579,7 @@ export async function fetchAdminOverview(): Promise<AdminOverview> {
   return {
     batches: batchSummaries,
     drones: droneSummaries,
+    models: modelSummaries,
     hubs: hubSummaries,
     sellers: sellerSummaries,
     zones: zoneSummaries,

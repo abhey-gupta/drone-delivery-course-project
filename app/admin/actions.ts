@@ -62,7 +62,10 @@ async function updateBatchStopsForBatch(batchId: number, status: string) {
   if (error) throw new Error(error.message);
 }
 
-async function nextIntegerId(table: 'hubs' | 'hub_location_zone', column: 'hub_id' | 'hub_location_id') {
+async function nextIntegerId(
+  table: 'drones' | 'hubs' | 'hub_location_zone',
+  column: 'drone_id' | 'hub_id' | 'hub_location_id',
+) {
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase.from(table).select(column).order(column, { ascending: false }).limit(1).maybeSingle();
   if (error) throw new Error(error.message);
@@ -340,34 +343,42 @@ export async function createDrone(formData: FormData) {
   const modelId = Number(formData.get('modelId'));
   const hubId = Number(formData.get('hubId'));
   const zoneId = Number(formData.get('zoneId'));
-  const initialCharge = Number(formData.get('initialCharge'));
 
   if (!Number.isFinite(modelId) || !Number.isFinite(hubId)) {
     throw new Error('Model and hub are required to create a drone.');
   }
 
-  const charge = Number.isFinite(initialCharge) ? Math.max(0, Math.min(100, initialCharge)) : 100;
-
   const supabase = getSupabaseAdminClient();
+
+  const { data: modelData, error: modelError } = await supabase
+    .from('models')
+    .select('model_id')
+    .eq('model_id', modelId)
+    .maybeSingle();
+
+  if (modelError) throw new Error(modelError.message);
+  if (!modelData) throw new Error(`Model #${modelId} does not exist.`);
 
   // Lookup hub location to set last_known_location
   const { data: hubData, error: hubError } = await supabase
     .from('hubs')
-    .select('hub_id, hub_location_id, hub_location')
+    .select('hub_id, zone_id, hub_location')
     .eq('hub_id', hubId)
     .maybeSingle();
 
   if (hubError) throw new Error(hubError.message);
   if (!hubData) throw new Error(`Hub #${hubId} does not exist.`);
 
+  const droneId = await nextIntegerId('drones', 'drone_id');
   const timestamp = nowIso();
+  const effectiveZoneId = Number.isFinite(zoneId) ? zoneId : (hubData.zone_id ?? null);
 
   const { error: insertError } = await supabase.from('drones').insert({
+    drone_id: droneId,
     model_id: modelId,
     current_hub_id: hubId,
     home_hub_id: hubId,
-    zone_id: Number.isFinite(zoneId) ? zoneId : null,
-    current_charge: charge,
+    zone_id: effectiveZoneId,
     status: 'available',
     updated_at: timestamp,
     last_known_location: hubData.hub_location ?? null,

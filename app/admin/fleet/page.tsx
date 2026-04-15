@@ -10,8 +10,6 @@ function statusTone(status: string) {
     case 'en_route':
     case 'in_flight':
       return 'bg-blue-500/15 text-blue-300 border-blue-500/30';
-    case 'charging':
-      return 'bg-amber-500/15 text-amber-300 border-amber-500/30';
     case 'maintenance':
       return 'bg-rose-500/15 text-rose-300 border-rose-500/30';
     default:
@@ -19,15 +17,9 @@ function statusTone(status: string) {
   }
 }
 
-function chargeColor(charge: number | null) {
-  if (charge === null) return 'text-slate-500';
-  if (charge >= 80) return 'text-emerald-400';
-  if (charge >= 40) return 'text-amber-400';
-  return 'text-rose-400';
-}
-
 export default async function FleetPage() {
   const overview = await fetchAdminOverview();
+  const defaultModelId = overview.models[0]?.modelId ?? '';
 
   const statusGroups = [
     { label: 'Available', count: overview.drones.filter((d) => d.status.toLowerCase() === 'available').length, color: 'text-emerald-400', bg: 'bg-emerald-500/15 border-emerald-500/20' },
@@ -105,28 +97,6 @@ export default async function FleetPage() {
                         </span>
                       </div>
 
-                      {/* Charge bar */}
-                      <div className="mb-3">
-                        <div className="flex items-center justify-between text-[11px] mb-1.5">
-                          <span className="text-slate-500">Battery</span>
-                          <span className={`font-semibold ${chargeColor(drone.currentCharge)}`}>
-                            {drone.currentCharge ?? 0}%
-                          </span>
-                        </div>
-                        <div className="h-1.5 rounded-full bg-slate-800">
-                          <div
-                            className={`h-full rounded-full transition-all duration-500 ${
-                              (drone.currentCharge ?? 0) >= 80
-                                ? 'bg-gradient-to-r from-emerald-500 to-emerald-400'
-                                : (drone.currentCharge ?? 0) >= 40
-                                ? 'bg-gradient-to-r from-amber-500 to-amber-400'
-                                : 'bg-gradient-to-r from-rose-500 to-rose-400'
-                            }`}
-                            style={{ width: `${Math.min(100, drone.currentCharge ?? 0)}%` }}
-                          />
-                        </div>
-                      </div>
-
                       {/* Details */}
                       <div className="space-y-1.5 text-[11px] text-slate-500">
                         <div className="flex items-center justify-between">
@@ -134,12 +104,12 @@ export default async function FleetPage() {
                           <span className="text-slate-400">{drone.currentHubId ? `Hub #${drone.currentHubId}` : '—'}</span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span>Capacity</span>
-                          <span className="text-slate-400">{drone.maxCapacity ?? '—'} kg</span>
+                          <span>Operating Zone</span>
+                          <span className="text-slate-400">{drone.zoneId ? `Zone ${drone.zoneId}` : '—'}</span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span>Max Flight</span>
-                          <span className="text-slate-400">{drone.maxChargeDuration ?? '—'} min</span>
+                          <span>Capacity</span>
+                          <span className="text-slate-400">{drone.maxCapacity ?? '—'} kg</span>
                         </div>
                         <div className="flex items-center justify-between">
                           <span>Assignment</span>
@@ -168,11 +138,21 @@ export default async function FleetPage() {
                 <select
                   name="modelId"
                   className="w-full rounded-lg border border-slate-700/50 bg-[#0c1220] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
-                  defaultValue="1"
+                  defaultValue={defaultModelId}
                 >
-                  <option value="1">DX-100 (5 kg, 60 min)</option>
+                  {overview.models.length === 0 ? (
+                    <option value="" disabled>No drone models available</option>
+                  ) : (
+                    overview.models.map((model) => (
+                      <option key={model.modelId} value={model.modelId}>
+                        {model.label} ({model.maxCapacity ?? '—'} kg)
+                      </option>
+                    ))
+                  )}
                 </select>
-                <p className="text-[10px] text-slate-600 mt-1">Select the drone model to deploy.</p>
+                <p className="text-[10px] text-slate-600 mt-1">
+                  Select from the live drone models stored in the database.
+                </p>
               </div>
 
               {/* Hub */}
@@ -189,19 +169,6 @@ export default async function FleetPage() {
                   ))}
                 </select>
                 <p className="text-[10px] text-slate-600 mt-1">The hub where this drone will be stationed.</p>
-              </div>
-
-              {/* Initial Charge */}
-              <div>
-                <label className="block text-xs font-medium uppercase tracking-wide text-slate-500 mb-1.5">Initial Charge %</label>
-                <input
-                  name="initialCharge"
-                  type="number"
-                  min="0"
-                  max="100"
-                  defaultValue="100"
-                  className="w-full rounded-lg border border-slate-700/50 bg-[#0c1220] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
-                />
               </div>
 
               {/* Zone */}

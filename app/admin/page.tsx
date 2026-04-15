@@ -170,7 +170,7 @@ export default async function AdminOverviewPage() {
                       <div className="min-w-0">
                         <div className="text-sm font-medium text-slate-200">{drone.label}</div>
                         <div className="text-xs text-slate-500 mt-0.5">
-                          Hub {drone.currentHubId ?? '—'} · {drone.currentCharge ?? 0}% charge
+                          Hub {drone.currentHubId ?? '—'}
                           {drone.assignedBatchId ? ` · Batch #${drone.assignedBatchId}` : ''}
                         </div>
                       </div>
